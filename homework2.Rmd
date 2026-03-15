@@ -1,0 +1,406 @@
+---
+title: "Homework2"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r}
+options(repos = c(CRAN = "https://cran.rstudio.com"))
+
+install.packages(c(
+  "tidyverse",
+  "ggplot2",
+  "earth",
+  "mgcv",
+  "pdp",
+  "patchwork",
+  "caret"
+))
+```
+
+
+
+## Point 1. Read in the data and partition into training and test sets
+
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+Libraries to be used in this:
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(earth)
+library(mgcv)
+library(pdp)
+library(patchwork)
+library(caret)
+```
+
+reading in data:
+```{r}
+setwd("/Users/karolinawiesiolek/Desktop/Mailman Spring 2026/DSII/HW2")
+
+college <- read.csv("College.csv", stringsAsFactors = FALSE)
+
+dim(college)
+names(college)
+head(college)
+summary(college)
+```
+
+rename first column:
+```{r}
+if (names(college)[1] != "College") {
+  names(college)[1] <- "College"
+}
+
+str(college)
+```
+
+data partition:
+```{r}
+set.seed(2026)
+
+n <- nrow(college)
+train_id <- sample(seq_len(n), size = round(0.8 * n))
+
+train <- college[train_id, ]
+test  <- college[-train_id, ]
+
+dim(train)
+dim(test)
+```
+
+Defining RMSE function:
+```{r}
+rmse <- function(pred, truth) {
+  sqrt(mean((pred - truth)^2))
+}
+```
+
+## Point 2. Part (a): Smoothing spline using Top10perc only
+
+#2.1 Fit smoothing splines across a range of degrees of freedom
+```{r}
+df_grid <- 3:12
+
+spline_fits <- lapply(df_grid, function(d) {
+  smooth.spline(
+    x = train$Top10perc,
+    y = train$Outstate,
+    df = d,
+    cv = TRUE
+  )
+})
+
+cv_table <- data.frame(
+  df = df_grid,
+  cv_score = sapply(spline_fits, function(fit) fit$cv.crit)
+)
+
+cv_table
+```
+
+# 2.2 Choosing the best degree of freedom
+```{r}
+best_df <- cv_table$df[which.min(cv_table$cv_score)]
+best_df
+```
+
+
+#2.3 Creating data for plotting fitted curves
+
+```{r}
+x_grid <- seq(min(train$Top10perc), max(train$Top10perc), length.out = 200)
+
+plot_data_list <- lapply(seq_along(df_grid), function(i) {
+  pred_i <- predict(spline_fits[[i]], x = x_grid)
+  
+  data.frame(
+    Top10perc = pred_i$x,
+    Outstate_hat = pred_i$y,
+    df = paste("df =", df_grid[i])
+  )
+})
+
+plot_data <- bind_rows(plot_data_list)
+
+```
+
+#2.4 Plot fitted curves for each degree of freedom
+```{r}
+ggplot(train, aes(x = Top10perc, y = Outstate)) +
+  geom_point(alpha = 0.5, color = "gray40") +
+  geom_line(
+    data = plot_data,
+    aes(x = Top10perc, y = Outstate_hat),
+    color = "blue",
+    linewidth = 1
+  ) +
+  facet_wrap(~ df, ncol = 2) +
+  labs(
+    title = "Smoothing spline fits across degrees of freedom",
+    x = "Top10perc",
+    y = "Outstate"
+  ) +
+  theme_minimal()
+```
+
+#2.5 Plot the optimal smoothing spline fit
+```{r}
+best_spline <- smooth.spline(
+  x = train$Top10perc,
+  y = train$Outstate,
+  df = best_df,
+  cv = TRUE
+)
+
+best_pred <- predict(best_spline, x = x_grid)
+
+best_plot_df <- data.frame(
+  Top10perc = best_pred$x,
+  Outstate_hat = best_pred$y
+)
+```
+
+```{r}
+ggplot(train, aes(x = Top10perc, y = Outstate)) +
+  geom_point(alpha = 0.5, color = "gray40") +
+  geom_line(
+    data = best_plot_df,
+    aes(x = Top10perc, y = Outstate_hat),
+    color = "red",
+    linewidth = 1.2
+  ) +
+  labs(
+    title = paste("Optimal smoothing spline fit (df =", best_df, ")"),
+    subtitle = "Selected using the smallest CV score",
+    x = "Top10perc",
+    y = "Outstate"
+  ) +
+  theme_minimal()
+```
+
+#2.6 Compute test error for the selected spline model
+```{r}
+spline_test_pred <- predict(best_spline, x = test$Top10perc)$y
+spline_test_rmse <- rmse(spline_test_pred, test$Outstate)
+
+spline_test_rmse
+```
+
+#2.7 answer for Point 2a
+At lower degrees of freedom, the smoothing spline is very smooth and may underfit the relationship between Top10perc and Outstate. As the degrees of freedom increase, the spline becomes more flexible and can capture more curvature in the data. When the degrees of freedom become too large, the fitted curve may become too wiggly and begin fitting noise rather than the underlying trend.
+
+I selected the optimal degree of freedom using the cross-validation criterion returned by smooth.spline(..., cv = TRUE). Specifically, I chose the degree of freedom with the smallest CV score. The test RMSE for the selected smoothing spline model is reported above.
+
+## Point 3. Part (b): Multivariate Adaptive Regression Splines (MARS)
+#3.1 data prepp for MARS 
+```{r}
+train_mars <- train %>% select(-College)
+test_mars  <- test %>% select(-College)
+
+str(train_mars)
+```
+
+#3.2 Fit the MARS model
+```{r}
+set.seed(2026)
+
+mars_fit <- earth(
+  Outstate ~ .,
+  data = train_mars,
+  degree = 2,
+  trace = 0
+)
+
+summary(mars_fit)
+```
+
+#3.3 Report the regression function
+```{r}
+formula(mars_fit)
+coef(mars_fit)
+```
+
+#3.4 Display variable importance
+```{r}
+evimp(mars_fit)
+```
+
+#3.5 Partial dependence plot for an arbitrary predictor
+```{r}
+mars_pdp <- partial(
+  object = mars_fit,
+  pred.var = "Expend",
+  train = train_mars
+)
+
+head(mars_pdp)
+```
+
+```{r}
+autoplot(mars_pdp, contour = FALSE) +
+  labs(
+    title = "Partial dependence plot for Expend in the MARS model",
+    x = "Expend",
+    y = "Predicted Outstate"
+  ) +
+  theme_minimal()
+```
+
+
+#3.6 Compute test error for the MARS model
+```{r}
+mars_test_pred <- predict(mars_fit, newdata = test_mars)
+mars_test_rmse <- rmse(mars_test_pred, test_mars$Outstate)
+
+mars_test_rmse
+```
+
+#3.7 Written answer for part 3b
+
+The MARS model fits a flexible regression function using piecewise linear basis functions. This allows the model to capture nonlinear relationships and interactions among predictors without requiring these terms to be specified in advance. The regression function is reported above through the fitted basis functions and coefficients. The partial dependence plot for Expend shows how predicted out-of-state tuition changes as instructional expenditure changes, averaging over the other predictors. The test RMSE reported above summarizes the predictive performance of the MARS model on the test data.
+
+
+## Point 4. Part (c): Generalized Additive Model (GAM)
+
+#4.1 Prepare data for GAM
+```{r}
+train_gam <- train %>% select(-College)
+test_gam  <- test %>% select(-College)
+```
+
+#4.2 Fit the GAM model
+```{r}
+set.seed(2026)
+
+gam_fit <- gam(
+  Outstate ~ 
+    s(Apps, k = 10) +
+    s(Accept, k = 10) +
+    s(Enroll, k = 10) +
+    s(Top10perc, k = 10) +
+    s(Top25perc, k = 10) +
+    s(F.Undergrad, k = 10) +
+    s(P.Undergrad, k = 10) +
+    s(Room.Board, k = 10) +
+    s(Books, k = 10) +
+    s(Personal, k = 10) +
+    s(PhD, k = 10) +
+    s(Terminal, k = 10) +
+    s(S.F.Ratio, k = 10) +
+    s(perc.alumni, k = 10) +
+    s(Expend, k = 10) +
+    s(Grad.Rate, k = 10),
+  data = train_gam,
+  method = "REML",
+  select = TRUE
+)
+
+summary(gam_fit)
+```
+
+
+
+#4.3 Plot nonlinear terms
+```{r}
+plot(gam_fit, pages = 1, shade = TRUE, residuals = TRUE)
+```
+
+#4.4 Compute test error for the GAM model
+```{r}
+gam_test_pred <- predict(gam_fit, newdata = test_gam)
+gam_test_rmse <- rmse(gam_test_pred, test_gam$Outstate)
+
+gam_test_rmse
+```
+
+#4.5 Written answer for part (c)
+
+The GAM allows each predictor to have its own smooth nonlinear relationship with Outstate. In the model summary, terms with estimated degrees of freedom greater than 1 suggest nonlinear effects. The plots above visualize these smooth terms. Some predictors may show approximately linear trends, while others may display more curvature, thresholds, or diminishing returns. The test RMSE reported above summarizes the predictive performance of the GAM on the test set.
+
+
+Point 5. Part (d): Would I favor a MARS model over a linear model in this dataset?
+
+#5.1 Fit a linear model for comparison
+```{r}
+train_lm <- train %>% select(-College)
+test_lm  <- test %>% select(-College)
+
+lm_fit <- lm(Outstate ~ ., data = train_lm)
+
+summary(lm_fit)
+```
+
+#5.2 Compute test error for the linear model
+```{r}
+lm_test_pred <- predict(lm_fit, newdata = test_lm)
+lm_test_rmse <- rmse(lm_test_pred, test_lm$Outstate)
+
+lm_test_rmse
+```
+
+#5.3 Compare predictive performance across models
+```{r}
+results <- data.frame(
+  Model = c(
+    "Smoothing spline (Top10perc only)",
+    "MARS",
+    "GAM",
+    "Linear model"
+  ),
+  Test_RMSE = c(
+    spline_test_rmse,
+    mars_test_rmse,
+    gam_test_rmse,
+    lm_test_rmse
+  )
+)
+
+results[order(results$Test_RMSE), ]
+```
+
+
+#5.4 Written answer for part (d)
+
+In this dataset, I would favor the MARS model over a linear model if the MARS model achieves a clearly lower test RMSE. A lower test RMSE would suggest that nonlinear relationships and interactions are important for predicting out-of-state tuition, and that a simple linear model may be too restrictive. Because tuition is likely influenced by multiple institutional features in complex ways, MARS can be useful since it automatically captures nonlinearities and interactions. However, if the MARS and linear model have very similar test errors, I would prefer the linear model because it is simpler and easier to interpret.
+
+
+## Point 6. Part (e): In practical applications, is MARS superior to a linear model?
+6.1 Written answer for part (e)
+
+In practical applications, I would not say that a MARS model is always superior to a linear model. The better choice depends on the purpose of the analysis and the structure of the data.
+
+A MARS model is often preferable when the main goal is prediction and the data contain nonlinear relationships or interactions that are difficult to specify ahead of time. Because it is more flexible, it can produce better predictive accuracy when the true relationships are not linear.
+
+A linear model is often preferable when interpretability, simplicity, and ease of communication are more important. Linear models are easier to explain, easier to report, and less complex. If the linear model performs nearly as well as the MARS model, the linear model may be the better practical choice.
+
+Therefore, in practice, I would compare both models on test-set performance and then decide whether the predictive gain from MARS is large enough to justify the additional complexity.
+
+
+##Point 7. Final comparison table
+```{r}
+results
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
